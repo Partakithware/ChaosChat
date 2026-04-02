@@ -2,7 +2,7 @@
 
 # ⚡ ChaosChat
 
-**Cryptographic peer-to-peer chat. No servers. No accounts. No traces.**
+**Cryptographic peer-to-peer chat. No servers. No accounts. No traces(?)**
 
 ![C](https://img.shields.io/badge/Language-C11-blue?style=flat-square&logo=c)
 ![GTK3](https://img.shields.io/badge/GUI-GTK3-green?style=flat-square)
