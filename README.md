@@ -2,6 +2,10 @@
 
 # ⚡ ChaosChat
 
+Theme B Screenshot (Needs theme work still):
+![ImageB](./Screenshot%20from%202026-04-03%2012-35-43.png)
+
+
 **Cryptographic peer-to-peer chat. No servers. No accounts. No traces(?)**
 
 ![C](https://img.shields.io/badge/Language-C11-blue?style=flat-square&logo=c)
