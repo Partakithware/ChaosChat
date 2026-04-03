@@ -3,6 +3,7 @@
 # ⚡ ChaosChat
 
 Theme B Screenshot (Needs theme work still):
+![ImageA](./Screenshot%20from%202026-04-03%2012-41-30.png)
 ![ImageB](./Screenshot%20from%202026-04-03%2012-35-43.png)
 
 
