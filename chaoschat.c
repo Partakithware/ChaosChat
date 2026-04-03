@@ -124,6 +124,7 @@ typedef struct {
 
     /* ── GTK widgets ── */
     GtkWidget       *window;
+    GtkWidget       *headerbar;   /* CSD titlebar — full CSS control      */
     GtkWidget       *stack;
     GtkWidget       *status_bar;
 
@@ -373,6 +374,14 @@ static gboolean idle_update_header(gpointer p)
              C.peer_name[0] ? C.peer_name : "?",
              C.my_port, C.chat_key);
     gtk_label_set_text(GTK_LABEL(C.lbl_peer), hdr);
+
+    /* Also update the CSD titlebar subtitle */
+    if (C.headerbar) {
+        char sub[128];
+        snprintf(sub, sizeof sub, "connected  ·  peer: %s",
+                 C.peer_name[0] ? C.peer_name : "?");
+        gtk_header_bar_set_subtitle(GTK_HEADER_BAR(C.headerbar), sub);
+    }
     return G_SOURCE_REMOVE;
 }
 
@@ -719,6 +728,20 @@ static void *connect_thread(void *arg)
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) { snprintf(r->err, 256, "socket: %s", strerror(errno)); goto done; }
 
+        int opt = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof opt);
+
+        /* Bind to MY PORT before connecting so both peers show their chosen
+         * port in tcpdump/ss — not a random OS-assigned ephemeral port.   */
+        struct sockaddr_in local = {0};
+        local.sin_family      = AF_INET;
+        local.sin_addr.s_addr = INADDR_ANY;
+        local.sin_port        = htons((uint16_t)C.my_port);
+        if (bind(fd, (struct sockaddr *)&local, sizeof local) < 0) {
+            snprintf(r->err, 256, "bind port %d: %s", C.my_port, strerror(errno));
+            close(fd); goto done;
+        }
+
         struct sockaddr_in addr = {0};
         addr.sin_family = AF_INET;
         addr.sin_port   = htons((uint16_t)C.target_port);
@@ -927,132 +950,305 @@ static gboolean on_key_press(GtkWidget *w, GdkEventKey *e, gpointer u)
 }
 
 /* ══════════════════════════════════════════════════
- *  CSS theme — Catppuccin Mocha variant
+ *  CSS theme — Deep Space / Neon Blue  (self-contained)
+ *
+ *  Uses only GTK3-supported CSS properties.
+ *  Fonts: monospace / sans-serif generic families only —
+ *  no external font files, no system-font assumptions.
+ *  Tested on GTK 3.18 – 3.24.
  * ══════════════════════════════════════════════════ */
 static const char *APP_CSS =
-    /* Window & base */
-    "window, .window-bg {"
-    "  background-color: #1e1e2e;"
-    "  color: #cdd6f4;"
+
+    /* ── Base window ── */
+    "window {"
+    "  background-color: #06060e;"
+    "  color: #c8dcff;"
     "}"
 
-    /* Setup card */
-    ".setup-card {"
-    "  background-color: #181825;"
-    "  border-radius: 14px;"
-    "  padding: 40px;"
-    "  border: 1px solid #313244;"
+    /* ════════════════════════════════
+     *  CLIENT-SIDE TITLEBAR (headerbar)
+     * ════════════════════════════════ */
+    "headerbar {"
+    "  background-color: #06060e;"
+    "  border-bottom: 1px solid #0f1830;"
+    "  padding: 0 10px;"
+    "  min-height: 44px;"
+    "  box-shadow: 0 2px 12px rgba(0,0,0,0.9);"
     "}"
-    ".setup-title {"
-    "  font-size: 26px;"
-    "  font-weight: bold;"
-    "  color: #cdd6f4;"
-    "  letter-spacing: 2px;"
-    "}"
-    ".setup-sub {"
+    "headerbar title {"
+    "  font-family: monospace;"
     "  font-size: 13px;"
-    "  color: #585b70;"
-    "  letter-spacing: 1px;"
-    "}"
-    ".field-label {"
-    "  font-size: 12px;"
     "  font-weight: bold;"
-    "  color: #6c7086;"
-    "  letter-spacing: 1px;"
-    "  text-transform: uppercase;"
+    "  color: #00aaff;"
+    "}"
+    "headerbar subtitle {"
+    "  font-family: monospace;"
+    "  font-size: 10px;"
+    "  color: #1e2d55;"
     "}"
 
-    /* Entries */
+    /* Window control dots — override ALL generic button rules */
+    "headerbar button.titlebutton {"
+    "  background-color: #1a1a2e;"
+    "  border: 1px solid #2a2a45;"
+    "  border-radius: 50%;"
+    "  padding: 0;"
+    "  min-width: 13px;"
+    "  min-height: 13px;"
+    "  margin: 0 3px;"
+    "  box-shadow: none;"
+    "}"
+    "headerbar button.titlebutton label {"
+    "  color: transparent;"
+    "  font-size: 1px;"
+    "}"
+    "headerbar button.titlebutton.close {"
+    "  background-color: #c0394b;"
+    "  border-color: #8a2535;"
+    "}"
+    "headerbar button.titlebutton.close:hover {"
+    "  background-color: #e84560;"
+    "}"
+    "headerbar button.titlebutton.minimize {"
+    "  background-color: #b07a20;"
+    "  border-color: #7a5510;"
+    "}"
+    "headerbar button.titlebutton.minimize:hover {"
+    "  background-color: #d4982a;"
+    "}"
+    "headerbar button.titlebutton.maximize {"
+    "  background-color: #208c60;"
+    "  border-color: #106040;"
+    "}"
+    "headerbar button.titlebutton.maximize:hover {"
+    "  background-color: #28b07a;"
+    "}"
+
+    /* ════════════════════════════════
+     *  SETUP CARD
+     * ════════════════════════════════ */
+    ".setup-card {"
+    "  background-color: #09091a;"
+    "  border-radius: 14px;"
+    "  padding: 44px 50px;"
+    "  border: 1px solid #0f1830;"
+    "  box-shadow: 0 0 40px rgba(0,0,0,0.8), 0 0 1px #00aaff;"
+    "}"
+
+    ".setup-title {"
+    "  font-family: monospace;"
+    "  font-size: 28px;"
+    "  font-weight: bold;"
+    "  color: #00aaff;"
+    "}"
+
+    ".setup-sub {"
+    "  font-family: monospace;"
+    "  font-size: 11px;"
+    "  font-style: italic;"
+    "  color: #1e2d55;"
+    "}"
+
+    ".field-label {"
+    "  font-family: monospace;"
+    "  font-size: 11px;"
+    "  font-weight: bold;"
+    "  color: #3a5090;"
+    "}"
+
+    /* ════════════════════════════════
+     *  ENTRIES
+     * ════════════════════════════════ */
     "entry {"
-    "  background-color: #313244;"
-    "  color: #cdd6f4;"
-    "  border-color: #45475a;"
-    "  border-radius: 8px;"
-    "  padding: 8px 12px;"
+    "  background-color: #06060e;"
+    "  color: #c8dcff;"
+    "  border-color: #0f1830;"
+    "  border-style: solid;"
+    "  border-width: 1px;"
+    "  border-radius: 7px;"
+    "  padding: 9px 14px;"
     "  font-family: monospace;"
     "  font-size: 14px;"
     "}"
     "entry:focus {"
-    "  border-color: #89b4fa;"
-    "  box-shadow: 0 0 0 2px alpha(#89b4fa, 0.3);"
+    "  background-color: #06060e;"
+    "  border-color: #00aaff;"
+    "  border-width: 2px;"
+    "  color: #e0f0ff;"
+    "  box-shadow: 0 0 10px rgba(0, 170, 255, 0.2);"
     "}"
-    "entry placeholder { color: #45475a; }"
+    "entry:disabled {"
+    "  background-color: #09091a;"
+    "  color: #1a2040;"
+    "}"
+    "entry > * {"
+    "  color: #1e2d55;"
+    "}"
 
-    /* Buttons */
+    /* ════════════════════════════════
+     *  BUTTONS  (generic — NOT titlebar)
+     * ════════════════════════════════ */
     "button {"
-    "  background-color: #89b4fa;"
-    "  color: #1e1e2e;"
-    "  border-radius: 8px;"
-    "  padding: 8px 20px;"
+    "  background-color: #0055bb;"
+    "  color: #e8f4ff;"
+    "  border-radius: 7px;"
+    "  border: 1px solid #0077ee;"
+    "  padding: 9px 22px;"
+    "  font-family: monospace;"
     "  font-weight: bold;"
-    "  font-size: 14px;"
-    "  border: none;"
-    "  letter-spacing: 0.5px;"
+    "  font-size: 13px;"
+    "}"
+    "button label {"
+    "  color: #e8f4ff;"
+    "  font-weight: bold;"
     "}"
     "button:hover {"
-    "  background-color: #b4befe;"
+    "  background-color: #0077ee;"
+    "  border-color: #00aaff;"
+    "  box-shadow: 0 0 12px rgba(0, 170, 255, 0.35);"
+    "}"
+    "button:active {"
+    "  background-color: #003d99;"
+    "  box-shadow: none;"
     "}"
     "button:disabled {"
-    "  background-color: #313244;"
-    "  color: #585b70;"
+    "  background-color: #0a0a18;"
+    "  border-color: #0f1830;"
+    "  color: #1e2d55;"
+    "}"
+    "button:disabled label {"
+    "  color: #1e2d55;"
     "}"
 
-    /* Chat header */
+    /* ════════════════════════════════
+     *  CHAT HEADER
+     * ════════════════════════════════ */
     "#chat-header {"
-    "  background-color: #11111b;"
-    "  padding: 8px 14px;"
-    "  border-bottom: 1px solid #313244;"
+    "  background-color: #06060e;"
+    "  padding: 10px 16px;"
+    "  border-bottom: 1px solid #0f1830;"
+    "  min-height: 38px;"
     "}"
     "#peer-label {"
     "  font-family: monospace;"
     "  font-size: 12px;"
-    "  color: #6c7086;"
+    "  color: #2a4070;"
     "}"
 
-    /* Chat view */
-    "textview, textview text {"
-    "  background-color: #11111b;"
-    "  color: #cdd6f4;"
-    "  font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;"
+    /* ════════════════════════════════
+     *  CHAT TEXT VIEW
+     * ════════════════════════════════ */
+    "textview {"
+    "  background-color: #03030a;"
+    "  color: #c8dcff;"
+    "  font-family: monospace;"
     "  font-size: 14px;"
-    "  caret-color: #89b4fa;"
     "}"
-    "scrolledwindow {"
-    "  background-color: #11111b;"
+    "textview text {"
+    "  background-color: #03030a;"
+    "  color: #c8dcff;"
+    "  font-family: monospace;"
+    "  font-size: 14px;"
     "}"
 
-    /* Message input row */
+    /* ════════════════════════════════
+     *  SCROLLED WINDOW + SCROLLBAR
+     * ════════════════════════════════ */
+    "scrolledwindow {"
+    "  background-color: #03030a;"
+    "  border: none;"
+    "}"
+    "scrolledwindow undershoot.top,"
+    "scrolledwindow undershoot.bottom {"
+    "  background-color: #03030a;"
+    "}"
+    "scrollbar {"
+    "  background-color: #03030a;"
+    "  border: none;"
+    "}"
+    "scrollbar slider {"
+    "  background-color: #0f1830;"
+    "  border-radius: 6px;"
+    "  min-width: 5px;"
+    "  min-height: 5px;"
+    "}"
+    "scrollbar slider:hover {"
+    "  background-color: #1a2a50;"
+    "}"
+
+    /* ════════════════════════════════
+     *  MESSAGE INPUT ROW
+     * ════════════════════════════════ */
     "#input-row {"
-    "  background-color: #1e1e2e;"
-    "  padding: 10px 12px;"
-    "  border-top: 1px solid #313244;"
+    "  background-color: #06060e;"
+    "  padding: 12px 14px;"
+    "  border-top: 1px solid #0f1830;"
     "}"
     "#msg-entry {"
+    "  font-family: monospace;"
     "  font-size: 14px;"
+    "  background-color: #03030a;"
+    "  border-color: #0f1830;"
     "}"
+    "#msg-entry:focus {"
+    "  border-color: #00aaff;"
+    "  border-width: 2px;"
+    "  box-shadow: 0 0 8px rgba(0, 170, 255, 0.2);"
+    "}"
+
+    /* Send button — neon teal-green */
     "#send-btn {"
-    "  background-color: #a6e3a1;"
-    "  color: #1e1e2e;"
-    "  min-width: 72px;"
+    "  background-color: #007755;"
+    "  border-color: #00aa77;"
+    "  color: #c0ffe8;"
+    "  min-width: 80px;"
+    "}"
+    "#send-btn label {"
+    "  color: #c0ffe8;"
+    "  font-weight: bold;"
     "}"
     "#send-btn:hover {"
-    "  background-color: #94e2d5;"
+    "  background-color: #009966;"
+    "  border-color: #00cc88;"
+    "  box-shadow: 0 0 12px rgba(0, 180, 120, 0.35);"
+    "}"
+    "#send-btn:active {"
+    "  background-color: #005540;"
+    "}"
+    "#send-btn:disabled {"
+    "  background-color: #0a0a18;"
+    "  border-color: #0f1830;"
+    "  color: #1e2d55;"
     "}"
 
-    /* Status bar */
+    /* ════════════════════════════════
+     *  STATUS BAR
+     * ════════════════════════════════ */
     "#status-bar {"
-    "  background-color: #11111b;"
-    "  color: #585b70;"
+    "  background-color: #04040b;"
+    "  color: #1e2d55;"
     "  font-family: monospace;"
     "  font-size: 11px;"
-    "  padding: 4px 12px;"
-    "  border-top: 1px solid #181825;"
+    "  padding: 5px 14px;"
+    "  border-top: 1px solid #09091a;"
     "}"
 
-    /* Separator */
+    /* ════════════════════════════════
+     *  SEPARATOR
+     * ════════════════════════════════ */
     "separator {"
-    "  background-color: #313244;"
+    "  background-color: #0f1830;"
+    "  color: #0f1830;"
     "  min-height: 1px;"
+    "  margin-top: 6px;"
+    "  margin-bottom: 6px;"
+    "}"
+
+    /* ════════════════════════════════
+     *  SPINNER
+     * ════════════════════════════════ */
+    "spinner {"
+    "  color: #00aaff;"
     "}";
 
 /* ══════════════════════════════════════════════════
@@ -1238,10 +1434,19 @@ int main(int argc, char *argv[])
 
     /* Main window */
     C.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(C.window), "ChaosChat");
     gtk_window_set_default_size(GTK_WINDOW(C.window), 720, 540);
     gtk_window_set_position(GTK_WINDOW(C.window), GTK_WIN_POS_CENTER);
     g_signal_connect(C.window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
+
+    /* Client-side decorations — gives us 100% CSS control over titlebar +
+     * window-control buttons; no more ugly WM-drawn chrome.              */
+    C.headerbar = gtk_header_bar_new();
+    gtk_header_bar_set_title(GTK_HEADER_BAR(C.headerbar), "⚡  CHAOSCHAT");
+    gtk_header_bar_set_subtitle(GTK_HEADER_BAR(C.headerbar),
+                                "stream-embedded p2p");
+    gtk_header_bar_set_show_close_button(GTK_HEADER_BAR(C.headerbar), TRUE);
+    gtk_widget_set_name(C.headerbar, "main-header");
+    gtk_window_set_titlebar(GTK_WINDOW(C.window), C.headerbar);
 
     GtkWidget *root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_container_add(GTK_CONTAINER(C.window), root);
