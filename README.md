@@ -48,12 +48,13 @@ Two instances of the binary connect directly over a raw TCP socket and communica
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  FFFFFFA3B2C4...⚡TAG⚡...9D3AFFC2B1...⚡TAG⚡...A4D9B3C2FF...       │
+│  zF2jd69Xj...⚡TAG⚡...qLi7XPgC8v...⚡TAG⚡...O08MWsA/Lp...          │
 │                  ↑                      ↑                            │
 │             Alice → Bob            Bob → Alice                       │
 │           (AES-256-CTR)           (AES-256-CTR)                      │
 │                                                                      │
-│  Everything else: ChaCha20 cryptographic noise                       │
+│  Everything else: ChaCha20 keystream encoded as base64               │
+│  Passive observers see: HTTP traffic                                 │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -101,6 +102,8 @@ Username:   Bob
 > [!IMPORTANT]
 > The **Chat Key** must match exactly on both sides. Exchange it securely out-of-band — in person, by phone, or via a separate trusted channel.
 
+Both peers bind to their chosen **My Port** — including the connecting side. A passive `tcpdump` or `ss` observer will see both chosen ports, not a random OS-assigned ephemeral port on one side.
+
 ---
 
 ## How It Works
@@ -111,7 +114,7 @@ When launched, each user fills in four fields:
 
 | Field | Description |
 |---|---|
-| **My Port** | Local TCP port to bind and listen on |
+| **My Port** | Local TCP port to bind on — used by both listener and connector |
 | **Connect To** | Peer's `IP:port` — leave blank to wait for incoming connection |
 | **Chat Key** | Shared secret, must match exactly on both sides |
 | **Username** | Display name, sent encrypted inside each message. Defaults to `"User"` |
@@ -170,13 +173,13 @@ new_key = SHA256(current_key || 16384_bytes_of_stream_data)
 
 The new key replaces the old one, the hex tag updates, and the buffer resets. Because **TCP guarantees ordered, lossless delivery**, A's transmit ratchet and B's receive ratchet are fed identical data — they evolve to the same state at the same moment, with zero synchronisation messages.
 
-> At the current stream rate of ~17 KB/s, the ratchet evolves approximately **once per second** — the AES-256 key and the 64-char stream tag rotate roughly every second.
+> At the current stream rate, the ratchet evolves approximately **once per second** — the AES-256 key and the 64-char stream tag rotate roughly every second.
 
 ---
 
 ### The ChaCha20 Noise Stream
 
-The send thread runs continuously for the lifetime of the connection, firing every **30 milliseconds**.
+The send thread runs continuously for the lifetime of the connection, firing approximately every **30 milliseconds** with deliberate timing jitter.
 
 ```c
 // One-time setup before the loop:
@@ -186,14 +189,24 @@ EVP_CIPHER_CTX *noise_ctx = EVP_CIPHER_CTX_new();
 EVP_EncryptInit_ex(noise_ctx, EVP_chacha20(), NULL, chacha_key, chacha_iv);
 
 // Each tick — continue the stream, never reset:
-EVP_EncryptUpdate(noise_ctx, noise_bytes, &outlen, zeros, 256);
+EVP_EncryptUpdate(noise_ctx, noise_bytes, &outlen, zeros, chunk_size);
 
-// Map bytes → uppercase hex via lookup table:
-hex_chunk[i*2]     = HEX_UPPER[noise_bytes[i] >> 4];
-hex_chunk[i*2 + 1] = HEX_UPPER[noise_bytes[i] & 0x0F];
+// Map bytes → base64 via lookup table:
+chunk[i] = B64_CHARS[noise_bytes[i] & 63];
 ```
 
 The ChaCha20 context is created **once** and lives for the entire session. Each `EVP_EncryptUpdate` call continues the keystream from where the last one ended — the entire session's background noise is **one infinite non-repeating cryptographic stream**.
+
+The keystream bytes are mapped to the standard base64 alphabet (`A-Z`, `a-z`, `0-9`, `+`, `/`). This means the wire traffic is statistically indistinguishable from base64-encoded binary data — the kind produced by TLS sessions and websocket connections. A passive `tcpdump` observer classifies the stream as **HTTP**.
+
+Timing and volume are further obscured by two jitter mechanisms:
+
+| Property | Value |
+|---|---|
+| Base interval | 30 ms |
+| Timing jitter | ±5 ms per tick (from `RAND_bytes`) |
+| Base chunk size | 512 bytes |
+| Chunk size jitter | ±64 bytes per tick (from `RAND_bytes`) |
 
 | Property | `rand()` (old) | ChaCha20 (current) |
 |---|---|---|
@@ -201,7 +214,7 @@ The ChaCha20 context is created **once** and lives for the entire session. Each 
 | Period | Short, predictable | 2^64 blocks |
 | Distinguishable from random? | Yes | No |
 | Seeding | `time(NULL)` | OS entropy pool |
-| Speed | Fast | Faster |
+| Wire appearance | Uppercase hex | Base64 / HTTP |
 
 The ChaCha20 key and nonce are **local only** — never sent over the wire. The receiver ignores all noise and only scans for message tags.
 
@@ -251,6 +264,8 @@ The encrypted bytes are hex-encoded and stamped with a fixed-width tag — **no 
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
+The tag characters (`0-9`, `A-F`) are a valid subset of the base64 alphabet, so the embedded message is visually indistinguishable from surrounding noise.
+
 All fields are fixed width — parsing requires no delimiter searching and field boundary collision is **mathematically impossible** regardless of content.
 
 ---
@@ -266,17 +281,17 @@ The receive thread maintains a **512KB rolling buffer**. After every network rea
 The scanner uses `memmem` to search for the current 64-char ratchet tag. On a match:
 
 ```
-Buffer: ...FF3A9C...⟨TAG⟩⟨SEQ⟩⟨LEN⟩⟨ENCRYPTED_HEX_PAYLOAD⟩...B2D4FF...
-                    ↑
-                  Found!
-                    │
-                    ├─ Check seq against dedup table → already seen? Discard.
-                    ├─ Hex-decode payload → binary ciphertext
-                    ├─ AES-256-CTR decrypt (same key+IV derivation as sender)
-                    ├─ memchr('\x1F') → split into peer_name + body
-                    ├─ First message? Store peer_name, update header bar
-                    ├─ Post message to GTK display thread
-                    └─ memmove() — erase tag+payload from buffer. Gone.
+Buffer: ...zF2jd69X...⟨TAG⟩⟨SEQ⟩⟨LEN⟩⟨ENCRYPTED_HEX_PAYLOAD⟩...qLi7XPg...
+                       ↑
+                     Found!
+                       │
+                       ├─ Check seq against dedup table → already seen? Discard.
+                       ├─ Hex-decode payload → binary ciphertext
+                       ├─ AES-256-CTR decrypt (same key+IV derivation as sender)
+                       ├─ memchr('\x1F') → split into peer_name + body
+                       ├─ First message? Store peer_name, update header bar
+                       ├─ Post message to GTK display thread
+                       └─ memmove() — erase tag+payload from buffer. Gone.
 ```
 
 > Messages lost in a trimmed buffer window are **gone permanently** — no retransmission, no history, no persistence anywhere.
@@ -321,9 +336,12 @@ After first peer message arrives:
 | **IV uniqueness** | SHA256(ratchet\_key \|\| seq) | Cannot repeat within a session |
 | **Key rotation** | SHA-256 ratchet, every 16 KB | New key ~every 1 second |
 | **Tag rotation** | Derived from ratchet key | Rotates with key, ~every 1 second |
-| **Noise generation** | ChaCha20 via OpenSSL EVP | CSPRNG, infinite non-repeating stream |
+| **Noise generation** | ChaCha20 via OpenSSL EVP | Infinite non-repeating keystream |
 | **Noise seeding** | `RAND_bytes` → `getrandom()` | OS entropy pool |
-| **Traffic camouflage** | Continuous stream, never silent | No timing or volume leakage |
+| **Traffic camouflage** | Base64 encoding of keystream | Classified as HTTP by passive observers |
+| **Timing camouflage** | ±5 ms jitter per tick | Breaks automated timing fingerprints |
+| **Volume camouflage** | ±64 byte chunk size jitter | No fixed bitrate fingerprint |
+| **Port visibility** | Both peers bind chosen port | No OS-assigned ephemeral ports |
 | **Replay protection** | Seq dedup table, 65,536 entries | Per-session |
 | **Username privacy** | Encrypted with message body | Never in plaintext on the wire |
 
@@ -355,6 +373,9 @@ It must be exchanged out-of-band before connecting. There is no public key infra
 
 **The ratchet does not re-seed from message content.**
 It advances strictly on stream volume. This is not a Double Ratchet (as used in Signal) — it does not provide the break-in recovery property where a compromised session key heals itself after future messages. Forward secrecy here comes from the X25519 handshake only, not from ongoing message exchange.
+
+**The "one-shot" session.**
+The ratchet's synchronisation depends on every byte being observed in order from the start. A dropped connection cannot be resumed — both sides must reconnect and perform a fresh handshake, generating a new master seed. Any traffic captured from the dead session becomes permanently undecipherable, even to the original participants.
 
 **No message history.**
 There is no log file, no persistent storage, no way to recover a message after it has been extracted from the buffer and displayed. This is a feature by design.
