@@ -69,8 +69,10 @@
 #define MAX_MSG_LEN          4096
 #define RECV_BUF_SIZE        (512 * 1024)   /* rolling receive window        */
 #define RECV_TRIM_TO         (256 * 1024)   /* keep this much after trim     */
-#define SEND_CHUNK_SIZE      512            /* hex chars per stream tick     */
-#define SEND_INTERVAL_US     30000          /* 30 ms between stream ticks    */
+#define SEND_CHUNK_SIZE      512            /* base chaff chars per tick     */
+#define SEND_CHUNK_JITTER    128            /* ±64 byte chunk-size wobble    */
+#define SEND_INTERVAL_US     30000          /* 30 ms base interval           */
+#define SEND_JITTER_US       10000          /* ±5 ms timing wobble           */
 #define INITIAL_STREAM_BYTES (16 * 1024)    /* warm-up burst (bytes)         */
 #define MAX_SEQ_TRACK        65536          /* remembered received seq nums  */
 #define BACKLOG              1
@@ -149,6 +151,10 @@ typedef struct {
     
     pthread_mutex_t ratchet_lock;
 
+    /* ChaCha20 noise stream — one persistent context for the session */
+    EVP_CIPHER_CTX  *noise_ctx;
+    pthread_mutex_t  noise_lock;
+
     char user_name[64];
 } Chat;
 
@@ -160,11 +166,31 @@ static bool perform_handshake(int sock, unsigned char *out_seed);
  * ══════════════════════════════════════════════════ */
 static const char HEX_UPPER[] = "0123456789ABCDEF";
 
-/* Fill buf[0..n-1] with random uppercase hex chars; NUL-terminate. */
+/* Base64 alphabet for cover-traffic chaff */
+static const char B64_CHARS[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/* Fill buf[0..n-1] with cryptographically random uppercase hex chars.
+ * Uses OpenSSL RAND_bytes (already linked via -lcrypto).            */
 static void rand_hex(char *buf, size_t n)
 {
+    unsigned char tmp[n];
+    RAND_bytes(tmp, (int)n);
     for (size_t i = 0; i < n; i++)
-        buf[i] = HEX_UPPER[rand() & 0xF];
+        buf[i] = HEX_UPPER[tmp[i] & 0xF];
+    buf[n] = '\0';
+}
+
+/* Fill buf[0..n-1] with cryptographically random base64 chars.
+ * Chaff uses this so the stream looks like HTTPS binary content
+ * rather than a custom hex protocol. Tags ([0-9A-F]) are a valid
+ * base64 subset so they remain invisible in the flow.            */
+static void rand_b64(char *buf, size_t n)
+{
+    unsigned char tmp[n];
+    RAND_bytes(tmp, (int)n);
+    for (size_t i = 0; i < n; i++)
+        buf[i] = B64_CHARS[tmp[i] & 63];
     buf[n] = '\0';
 }
 
@@ -580,7 +606,7 @@ static bool send_all(int fd, const char *buf, size_t len)
 
 static void *send_thread(void *arg) {
     (void)arg;
-    char chunk[SEND_CHUNK_SIZE + 1];
+    char chunk[SEND_CHUNK_SIZE + SEND_CHUNK_JITTER + 2];
 
     while (C.running) {
         pthread_mutex_lock(&C.out_lock);
@@ -592,9 +618,30 @@ static void *send_thread(void *arg) {
             data_ptr = C.out_tag;
             bytes_to_send = strlen(C.out_tag);
         } else {
-            rand_hex(chunk, SEND_CHUNK_SIZE);
+            /* Variable chunk size: base ± half-jitter */
+            unsigned char jb;
+            RAND_bytes(&jb, 1);
+            size_t chunk_size = SEND_CHUNK_SIZE
+                + (size_t)(jb % SEND_CHUNK_JITTER)
+                - SEND_CHUNK_JITTER / 2;
+            if (chunk_size < 64) chunk_size = 64;
+
+            /* ChaCha20 keystream → base64 chaff.
+             * EVP_EncryptUpdate continues the infinite stream each tick —
+             * the entire session's noise is one non-repeating cipher stream. */
+            unsigned char noise_bytes[chunk_size];
+            static const unsigned char zeros[SEND_CHUNK_SIZE + SEND_CHUNK_JITTER + 2] = {0};
+            int outlen = 0;
+            pthread_mutex_lock(&C.noise_lock);
+            EVP_EncryptUpdate(C.noise_ctx, noise_bytes, &outlen, zeros, (int)chunk_size);
+            pthread_mutex_unlock(&C.noise_lock);
+
+            for (size_t i = 0; i < chunk_size; i++)
+                chunk[i] = B64_CHARS[noise_bytes[i] & 63];
+            chunk[chunk_size] = '\0';
+
             data_ptr = chunk;
-            bytes_to_send = SEND_CHUNK_SIZE;
+            bytes_to_send = chunk_size;
         }
 
         // --- THE FIX: LEAK-PROOF RATCHET FEED ---
@@ -625,7 +672,12 @@ static void *send_thread(void *arg) {
         if (C.out_ready) C.out_ready = false;
 
         pthread_mutex_unlock(&C.out_lock);
-        usleep(SEND_INTERVAL_US);
+
+        /* Jittered sleep: 30ms ± 5ms — breaks automated timing fingerprints */
+        unsigned char jb;
+        RAND_bytes(&jb, 1);
+        long jitter = (long)(jb % SEND_JITTER_US) - (long)(SEND_JITTER_US / 2);
+        usleep((useconds_t)(SEND_INTERVAL_US + jitter));
     }
     return NULL;
 }
@@ -674,6 +726,16 @@ static gboolean on_connected(gpointer p)
          */
         init_ratchet(&C.tx_state, r->seed);
         init_ratchet(&C.rx_state, r->seed);
+
+        /* ── ChaCha20 noise stream — one key/nonce per session, OS entropy ── */
+        unsigned char chacha_key[32], chacha_iv[16];
+        RAND_bytes(chacha_key, sizeof chacha_key);
+        RAND_bytes(chacha_iv,  sizeof chacha_iv);
+        C.noise_ctx = EVP_CIPHER_CTX_new();
+        EVP_EncryptInit_ex(C.noise_ctx, EVP_chacha20(), NULL, chacha_key, chacha_iv);
+        /* wipe key material from stack immediately */
+        OPENSSL_cleanse(chacha_key, sizeof chacha_key);
+        OPENSSL_cleanse(chacha_iv,  sizeof chacha_iv);
 
         pthread_t t;
         pthread_create(&t, NULL, send_thread, NULL); pthread_detach(t);
@@ -1421,6 +1483,7 @@ int main(int argc, char *argv[])
     pthread_mutex_init(&C.seq_lock, NULL);
     pthread_mutex_init(&C.buf_lock, NULL);
     pthread_mutex_init(&C.ratchet_lock, NULL);  /* BUG 4 fix */
+    pthread_mutex_init(&C.noise_lock, NULL);
 
     gtk_init(&argc, &argv);
 
@@ -1484,6 +1547,8 @@ int main(int argc, char *argv[])
     pthread_mutex_destroy(&C.seq_lock);
     pthread_mutex_destroy(&C.buf_lock);
     pthread_mutex_destroy(&C.ratchet_lock);
+    pthread_mutex_destroy(&C.noise_lock);
+    if (C.noise_ctx) EVP_CIPHER_CTX_free(C.noise_ctx);
 
     return 0;
 }
